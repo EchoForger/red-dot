@@ -131,7 +131,7 @@ def collect_project_links_with_cache(
     )
 
     try:
-        for page in range(1, max_pages + 1):
+        for page in tqdm(range(1, max_pages + 1)):
             page_url = f"{search_url}&solr%5Bpage%5D={page}"
 
             # ✅ 命中缓存
