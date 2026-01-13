@@ -7,35 +7,29 @@ import argparse
 # argparse
 # -----------------------------
 def parse_args():
-    parser = argparse.ArgumentParser(
-        description="Red Dot Projects Viewer"
-    )
+    parser = argparse.ArgumentParser(description="Red Dot Projects Viewer")
 
     parser.add_argument(
         "--data-dir",
         default="data",
         help="项目数据目录（包含 projects.json 和图片）"
     )
-
     parser.add_argument(
         "--host",
         default="127.0.0.1",
         help="Flask 监听地址"
     )
-
     parser.add_argument(
         "--port",
         type=int,
         default=5000,
         help="Flask 端口"
     )
-
     parser.add_argument(
         "--debug",
         action="store_true",
         help="开启 Flask debug 模式"
     )
-
     parser.add_argument(
         "--title",
         default="Red Dot Projects",
@@ -59,127 +53,139 @@ HTML = """
 <!DOCTYPE html>
 <html lang="zh">
 <head>
-<meta charset="UTF-8">
-<title>{{ title }}</title>
-<style>
-body {
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto;
-    margin: 40px;
-    background: #f6f6f6;
-}
-.project-row {
-    display: flex;
-    background: #ffffff;
-    margin-bottom: 20px;
-    padding: 20px;
-    border-radius: 8px;
-    gap: 24px;
-}
-.image-viewer {
-    width: 280px;
-    flex-shrink: 0;
-}
-.project-image {
-    width: 100%;
-    border-radius: 6px;
-    object-fit: cover;
-}
-.image-controls {
-    margin-top: 8px;
-    text-align: center;
-}
-.image-controls button {
-    margin: 0 4px;
-    padding: 4px 8px;
-    border-radius: 4px;
-    border: 1px solid #ccc;
-    background: #fff;
-    cursor: pointer;
-}
-.image-controls button:hover {
-    background: #eee;
-}
-.no-image {
-    width: 100%;
-    height: 180px;
-    background: #ddd;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    color: #666;
-    border-radius: 6px;
-}
-.project-info {
-    flex: 1;
-}
-.project-info h2 {
-    margin-top: 0;
-}
-.description {
-    color: #444;
-    line-height: 1.6;
-}
-</style>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>{{ title }}</title>
+
+  <!-- Tailwind CDN -->
+  <script src="https://cdn.tailwindcss.com"></script>
+
+  <style>
+    img { transition: opacity .2s ease; }
+  </style>
 </head>
 
-<body>
+<body class="min-h-screen bg-slate-50 text-slate-900">
+  <!-- Header -->
+  <header class="sticky top-0 z-10 border-b border-slate-200 bg-white/80 backdrop-blur">
+    <div class="mx-auto max-w-6xl px-4 py-4 flex items-center justify-between">
+      <div>
+        <h1 class="text-xl font-semibold tracking-tight">{{ title }}</h1>
+        <p class="text-sm text-slate-500">Red Dot Projects Viewer</p>
+      </div>
+      <div class="hidden sm:flex items-center gap-2 text-sm text-slate-500">
+        <span class="inline-flex items-center rounded-full bg-slate-100 px-3 py-1">
+          共 {{ projects|length }} 项
+        </span>
+      </div>
+    </div>
+  </header>
 
-<h1>{{ title }}</h1>
+  <!-- Main -->
+  <main class="mx-auto max-w-6xl px-4 py-8 space-y-6">
+    {% for p in projects %}
+    {% set row_id = loop.index %}
+    <section class="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
+      <div class="flex flex-col md:flex-row">
 
-{% for p in projects %}
-{% set row_id = loop.index %}
-<div class="project-row">
+        <!-- Left: Image (half page on md+) -->
+        <div class="md:w-1/2 bg-slate-100">
+          {% if p["Local Images"] %}
+            <div class="relative w-full">
+              <div class="aspect-[4/3] w-full overflow-hidden">
+                <img
+                  id="img-{{ row_id }}"
+                  class="h-full w-full object-cover"
+                  src="{{ url_for('data_files', filename=p['Local Images'][0]) }}"
+                  alt="{{ p.Title }}"
+                  loading="lazy"
+                />
+              </div>
 
-    <div class="image-viewer">
-        {% if p["Local Images"] %}
-            <img
-                id="img-{{ row_id }}"
-                class="project-image"
-                src="/{{ p['Local Images'][0] }}"
-            >
-            {% if p["Local Images"]|length > 1 %}
-            <div class="image-controls">
+              {% if p["Local Images"]|length > 1 %}
+              <div class="absolute bottom-3 left-3 right-3 flex flex-wrap gap-2">
                 {% for img in p["Local Images"] %}
-                <button onclick="switchImage('{{ row_id }}', '{{ img }}')">
-                    {{ loop.index }}
+                <button
+                  type="button"
+                  class="rounded-full bg-white/90 px-3 py-1 text-xs font-medium text-slate-700 shadow hover:bg-white focus:outline-none focus:ring-2 focus:ring-slate-400"
+                  onclick="switchImage('{{ row_id }}', '{{ img }}')"
+                >
+                  {{ loop.index }}
                 </button>
                 {% endfor %}
+              </div>
+              {% endif %}
             </div>
+          {% else %}
+            <div class="flex aspect-[4/3] w-full items-center justify-center text-slate-500">
+              <div class="text-center">
+                <div class="text-base font-medium">No Image</div>
+                <div class="text-xs text-slate-400 mt-1">未提供本地图片</div>
+              </div>
+            </div>
+          {% endif %}
+        </div>
+
+        <!-- Right: Info (half page on md+) -->
+        <div class="md:w-1/2 p-6 md:p-8">
+          <div class="flex items-start justify-between gap-4">
+            <h2 class="text-lg md:text-xl font-semibold leading-snug">
+              {{ p.Title }}
+            </h2>
+
+            {% if p.Year %}
+            <span class="shrink-0 rounded-full bg-slate-100 px-3 py-1 text-xs font-medium text-slate-700">
+              {{ p.Year }}
+            </span>
             {% endif %}
-        {% else %}
-            <div class="no-image">No Image</div>
-        {% endif %}
-    </div>
+          </div>
 
-    <div class="project-info">
-        <h2>{{ p.Title }}</h2>
+          {% if p.Description %}
+          <p class="mt-4 text-sm md:text-base leading-relaxed text-slate-600">
+            {{ p.Description }}
+          </p>
+          {% endif %}
 
-        {% if p.Year %}
-        <p><strong>Year:</strong> {{ p.Year }}</p>
-        {% endif %}
-
-        {% if p.Description %}
-        <p class="description">{{ p.Description }}</p>
-        {% endif %}
-
-        {% if p["Project URL"] %}
-        <p>
-            <a href="{{ p['Project URL'] }}" target="_blank">
-                查看 Red Dot 项目 →
+          <div class="mt-6 flex flex-wrap items-center gap-3">
+            {% if p["Project URL"] %}
+            <a
+              href="{{ p['Project URL'] }}"
+              target="_blank"
+              rel="noreferrer"
+              class="inline-flex items-center justify-center rounded-xl bg-slate-900 px-4 py-2 text-sm font-medium text-white shadow hover:bg-slate-800 focus:outline-none focus:ring-2 focus:ring-slate-400"
+            >
+              查看 Red Dot 项目 →
             </a>
-        </p>
-        {% endif %}
+            {% endif %}
+
+            {% if p["Local Images"] and (p["Local Images"]|length > 1) %}
+            <span class="text-xs text-slate-400">
+              共 {{ p["Local Images"]|length }} 张图片
+            </span>
+            {% endif %}
+          </div>
+        </div>
+
+      </div>
+    </section>
+    {% endfor %}
+  </main>
+
+  <footer class="mx-auto max-w-6xl px-4 pb-10 pt-4 text-xs text-slate-400">
+    <div class="border-t border-slate-200 pt-6">
+      本页面使用 Tailwind CSS 渲染。小屏自动上下布局；大屏左右各半。
     </div>
+  </footer>
 
-</div>
-{% endfor %}
-
-<script>
-function switchImage(rowId, src) {
-    document.getElementById("img-" + rowId).src = "/" + src;
-}
-</script>
-
+  <script>
+    function switchImage(rowId, src) {
+      const el = document.getElementById("img-" + rowId);
+      if (!el) return;
+      el.style.opacity = "0.4";
+      el.onload = () => { el.style.opacity = "1"; };
+      el.src = "/data/" + src;
+    }
+  </script>
 </body>
 </html>
 """
@@ -191,15 +197,29 @@ function switchImage(rowId, src) {
 def index():
     with open(os.path.join(DATA_DIR, "projects.json"), "r", encoding="utf-8") as f:
         projects = json.load(f)
+
+    # 关键：规范化 Local Images，避免 /data/data/... 这种双层路径
+    for p in projects:
+        imgs = p.get("Local Images") or []
+        fixed = []
+        for x in imgs:
+            x = str(x).replace("\\", "/")  # 兼容 Windows 反斜杠
+            if x.startswith("data/"):
+                x = x[len("data/"):]      # 去掉多余的 data/
+            fixed.append(x)
+        p["Local Images"] = fixed
+
     return render_template_string(
         HTML,
         projects=projects,
         title=args.title
     )
 
+
 @app.route("/data/<path:filename>")
 def data_files(filename):
     return send_from_directory(DATA_DIR, filename)
+
 
 # -----------------------------
 # Run
