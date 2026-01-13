@@ -40,7 +40,7 @@ def parse_args():
     parser.add_argument(
         "--max-pages",
         type=int,
-        default=10,
+        default=2,
         help="Number of search pages"
     )
 
@@ -189,10 +189,96 @@ def extract_project_data(url, headers, base_url):
     year_match = re.search(r"\b(19\d{2}|20[0-3]\d)\b", raw_text)
     year = year_match.group(0) if year_match else ""
 
+    # ----------------- Description (robust, exclude "Others interested too") -----------------
+    def clean_text(s: str) -> str:
+        s = (s or "").strip()
+        s = re.sub(r"[ \t]+\n", "\n", s)
+        s = re.sub(r"\n{3,}", "\n\n", s)
+        return s.strip()
+
     desc = ""
+
+    # 1) 原来的选择器（有的页面确实有）
     block = soup.select_one(".project-description")
     if block:
-        desc = block.get_text("\n", strip=True)
+        desc = clean_text(block.get_text("\n", strip=True))
+
+    # 2) 以 “Statement by the Jury / Jury statement / Begründung der Jury …” 为锚点，取其前面的正文段落
+    if not desc:
+        marker_patterns = [
+            r"Statement by the Jury",
+            r"Jury statement",
+            r"Begründung der Jury",
+        ]
+
+        marker = None
+        for pat in marker_patterns:
+            marker = soup.find(
+                lambda tag: isinstance(tag, Tag)
+                and tag.name in ("h2", "h3", "h4", "strong")
+                and re.search(pat, tag.get_text(" ", strip=True), re.I)
+            )
+            if marker:
+                break
+
+        if marker:
+            parts = []
+            cur = marker
+            while True:
+                prev = cur.find_previous_sibling()
+                if prev is None:
+                    break
+                if prev.name in ("h1", "h2", "h3", "h4"):
+                    break
+
+                txt = (prev.get_text(" ", strip=True) if hasattr(prev, "get_text") else "").strip()
+                if txt and not re.search(r"\b(Back|Download)\b", txt, re.I):
+                    if prev.name in ("p", "div", "section"):
+                        parts.append(txt)
+
+                cur = prev
+                if len(parts) > 10:
+                    break
+
+            parts = list(reversed(parts))
+            desc = clean_text("\n".join(parts))
+
+    # 3) 如果还没有：从 “main” 里取第一段“像正文”的文本（并在 Others interested too 前停止）
+    if not desc:
+        boundary_tag = None
+        boundary_text = soup.find(string=re.compile(r"Others interested too", re.I))
+        if boundary_text:
+            boundary_tag = boundary_text.find_parent()
+
+        container = soup.select_one("main") or soup.body or soup
+
+        paras = []
+        for el in container.descendants:
+            if boundary_tag is not None and isinstance(el, Tag) and el is boundary_tag:
+                break
+            if not isinstance(el, Tag):
+                continue
+            if el.name == "p":
+                txt = el.get_text(" ", strip=True)
+                txt = (txt or "").strip()
+                # 过滤明显不是正文的短句
+                if len(txt) >= 40 and not re.search(r"\b(Back|Download)\b", txt, re.I):
+                    paras.append(txt)
+                if len(paras) >= 2:  # 一般两段就够
+                    break
+
+        desc = clean_text("\n".join(paras))
+
+    # 4) 最后兜底：meta description / og:description
+    if not desc:
+        meta = soup.find("meta", attrs={"name": "description"})
+        if meta and meta.get("content"):
+            desc = clean_text(meta["content"])
+    if not desc:
+        og = soup.find("meta", attrs={"property": "og:description"})
+        if og and og.get("content"):
+            desc = clean_text(og["content"])
+    # ------------------------------------------------------------------------------------------
 
     # ----------------- Images (include slider, exclude "Others interested too") -----------------
     images = []
@@ -201,12 +287,9 @@ def extract_project_data(url, headers, base_url):
         if not u:
             return
         u = u.split("#")[0]
-
-        # 只收“项目相关图”：projects_pim 或 tx_solr_image(轮播 slider)
         if ("projects_pim" in u) or ("eID=tx_solr_image" in u and "usage=slider" in u):
             images.append(urljoin(base_url, u))
 
-    # 找到 “Others interested too” 标题，作为停止边界
     boundary_tag = None
     boundary_text = soup.find(string=re.compile(r"Others interested too", re.I))
     if boundary_text:
@@ -214,23 +297,19 @@ def extract_project_data(url, headers, base_url):
 
     container = soup.select_one("main") or soup.body or soup
 
-    # 按页面顺序遍历，遇到 boundary 就停
     for el in container.descendants:
         if boundary_tag is not None and isinstance(el, Tag) and el is boundary_tag:
             break
-
         if not isinstance(el, Tag):
             continue
 
         if el.name == "img":
             src = el.get("src") or el.get("data-src") or ""
             add_img(src)
-
         elif el.name == "a":
             href = el.get("href") or ""
             add_img(href)
 
-    # 去重（保序）
     images = list(dict.fromkeys(images))
     # ------------------------------------------------------------------------------------------
 
