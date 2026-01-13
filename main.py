@@ -6,7 +6,7 @@ import json
 import glob
 import argparse
 import requests
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urljoin
 from bs4 import BeautifulSoup, Tag
 from tqdm import tqdm
 
@@ -130,40 +130,42 @@ def collect_project_links_with_cache(
         options=options
     )
 
-    for page in range(1, max_pages + 1):
-        page_url = f"{search_url}&solr%5Bpage%5D={page}"
+    try:
+        for page in range(1, max_pages + 1):
+            page_url = f"{search_url}&solr%5Bpage%5D={page}"
 
-        # ✅ 命中缓存
-        if page_url in cache_map:
-            print(f"📦 使用缓存搜索页 {page}")
-            urls = cache_map[page_url]
-            all_project_urls.update(urls)
-            continue
+            # ✅ 命中缓存
+            if page_url in cache_map:
+                print(f"📦 使用缓存搜索页 {page}")
+                urls = cache_map[page_url]
+                all_project_urls.update(urls)
+                continue
 
-        print(f"📄 抓取搜索页 {page}: {page_url}")
-        driver.get(page_url)
-        time.sleep(page_wait)
+            print(f"📄 抓取搜索页 {page}: {page_url}")
+            driver.get(page_url)
+            time.sleep(page_wait)
 
-        elems = driver.find_elements(By.XPATH, "//a[contains(@href, '/project/')]")
-        urls = sorted({
-            e.get_attribute("href").split("#")[0]
-            for e in elems
-            if e.get_attribute("href") and "/project/" in e.get_attribute("href")
-        })
-
-        print(f"  ➜ 页面中发现 {len(urls)} 个项目")
-
-        if urls:
-            cache.append({
-                "Search Page URL": page_url,
-                "Project URLs": urls
+            elems = driver.find_elements(By.XPATH, "//a[contains(@href, '/project/')]")
+            urls = sorted({
+                e.get_attribute("href").split("#")[0]
+                for e in elems
+                if e.get_attribute("href") and "/project/" in e.get_attribute("href")
             })
-            cache_map[page_url] = urls
-            save_json(cache_path, cache)
 
-        all_project_urls.update(urls)
+            print(f"  ➜ 页面中发现 {len(urls)} 个项目")
 
-    driver.quit()
+            if urls:
+                cache.append({
+                    "Search Page URL": page_url,
+                    "Project URLs": urls
+                })
+                cache_map[page_url] = urls
+                save_json(cache_path, cache)
+
+            all_project_urls.update(urls)
+    finally:
+        driver.quit()
+
     return sorted(all_project_urls)
 
 
@@ -175,11 +177,69 @@ def get_soup(url, headers):
     return BeautifulSoup(r.text, "lxml"), r.text
 
 
+def _clean_text(s: str) -> str:
+    s = (s or "").strip()
+    s = re.sub(r"[ \t]+\n", "\n", s)
+    s = re.sub(r"\n{3,}", "\n\n", s)
+    return s.strip()
+
+
+def extract_lead_description_text(soup, title: str) -> str:
+    """
+    ✅ 目标：抓 “Back/Download 之后、Statement by the Jury 之前”的那段项目介绍（Buzzard40 属于此结构）
+    """
+    container = soup.select_one("main") or soup.body or soup
+    text = container.get_text("\n", strip=True)
+
+    # 可选：从标题后开始，避免顶部 banner/导航噪声
+    if title and title in text:
+        text = text.split(title, 1)[1]
+
+    # 从 “Back ... Download ...” 之后开始（有的页面这一行包含 Back 和 Download）
+    back_download_line = re.search(r"(?im)^\s*Back\b.*\bDownload\b.*$", text)
+    if back_download_line:
+        text = text[back_download_line.end():].strip()
+
+    # 在以下分界点之前截断（优先 Jury marker，其次 Credits/推荐）
+    end_markers = [
+        r"Statement by the Jury",
+        r"Jury statement",
+        r"Begründung der Jury",
+        r"Stellungnahme der Jury",
+        r"Credits",
+        r"Others interested too",
+        r"Andere interessierten sich auch",
+    ]
+    for pat in end_markers:
+        m = re.search(pat, text, flags=re.I)
+        if m:
+            text = text[:m.start()].strip()
+            break
+
+    # 清洗：去掉短行/按钮词，合并成一个段落
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    drop_exact = {"Back", "Download", "Zurück", "返回", "下载"}
+    lines = [ln for ln in lines if ln not in drop_exact]
+
+    # 只取“像正文”的内容（避免把零碎词拼进去）
+    candidates = [ln for ln in lines if len(ln) >= 80]
+    if not candidates:
+        # 放宽阈值再试一次
+        candidates = [ln for ln in lines if len(ln) >= 40]
+
+    if not candidates:
+        return ""
+
+    # 有些页面正文会被切成多行：用空格拼起来
+    desc = _clean_text(" ".join(candidates))
+    return desc
+
+
 def extract_project_data(url, headers, base_url):
     soup, raw_text = get_soup(url, headers)
 
-    title = soup.select_one("h1")
-    title = title.get_text(strip=True) if title else "Unknown"
+    title_tag = soup.select_one("h1")
+    title = title_tag.get_text(strip=True) if title_tag else "Unknown"
 
     category = ""
     cat = soup.select_one(".breadcrumb")
@@ -189,96 +249,28 @@ def extract_project_data(url, headers, base_url):
     year_match = re.search(r"\b(19\d{2}|20[0-3]\d)\b", raw_text)
     year = year_match.group(0) if year_match else ""
 
-    # ----------------- Description (robust, exclude "Others interested too") -----------------
-    def clean_text(s: str) -> str:
-        s = (s or "").strip()
-        s = re.sub(r"[ \t]+\n", "\n", s)
-        s = re.sub(r"\n{3,}", "\n\n", s)
-        return s.strip()
+    # ✅ 先用“Back/Download ~ Jury”规则抽取 lead description
+    desc = extract_lead_description_text(soup, title)
 
-    desc = ""
-
-    # 1) 原来的选择器（有的页面确实有）
-    block = soup.select_one(".project-description")
-    if block:
-        desc = clean_text(block.get_text("\n", strip=True))
-
-    # 2) 以 “Statement by the Jury / Jury statement / Begründung der Jury …” 为锚点，取其前面的正文段落
+    # ----------------- 兜底：如果 lead 抽不到，再尝试其他方式 -----------------
     if not desc:
-        marker_patterns = [
-            r"Statement by the Jury",
-            r"Jury statement",
-            r"Begründung der Jury",
-        ]
+        block = soup.select_one(".project-description")
+        if block:
+            tmp = _clean_text(block.get_text("\n", strip=True))
+            # 避免把 jury statement 当作 description（如果里面出现 Jury marker，放弃）
+            if not re.search(r"(Statement by the Jury|Jury statement|Begründung der Jury)", tmp, re.I):
+                desc = tmp
 
-        marker = None
-        for pat in marker_patterns:
-            marker = soup.find(
-                lambda tag: isinstance(tag, Tag)
-                and tag.name in ("h2", "h3", "h4", "strong")
-                and re.search(pat, tag.get_text(" ", strip=True), re.I)
-            )
-            if marker:
-                break
-
-        if marker:
-            parts = []
-            cur = marker
-            while True:
-                prev = cur.find_previous_sibling()
-                if prev is None:
-                    break
-                if prev.name in ("h1", "h2", "h3", "h4"):
-                    break
-
-                txt = (prev.get_text(" ", strip=True) if hasattr(prev, "get_text") else "").strip()
-                if txt and not re.search(r"\b(Back|Download)\b", txt, re.I):
-                    if prev.name in ("p", "div", "section"):
-                        parts.append(txt)
-
-                cur = prev
-                if len(parts) > 10:
-                    break
-
-            parts = list(reversed(parts))
-            desc = clean_text("\n".join(parts))
-
-    # 3) 如果还没有：从 “main” 里取第一段“像正文”的文本（并在 Others interested too 前停止）
     if not desc:
-        boundary_tag = None
-        boundary_text = soup.find(string=re.compile(r"Others interested too", re.I))
-        if boundary_text:
-            boundary_tag = boundary_text.find_parent()
-
-        container = soup.select_one("main") or soup.body or soup
-
-        paras = []
-        for el in container.descendants:
-            if boundary_tag is not None and isinstance(el, Tag) and el is boundary_tag:
-                break
-            if not isinstance(el, Tag):
-                continue
-            if el.name == "p":
-                txt = el.get_text(" ", strip=True)
-                txt = (txt or "").strip()
-                # 过滤明显不是正文的短句
-                if len(txt) >= 40 and not re.search(r"\b(Back|Download)\b", txt, re.I):
-                    paras.append(txt)
-                if len(paras) >= 2:  # 一般两段就够
-                    break
-
-        desc = clean_text("\n".join(paras))
-
-    # 4) 最后兜底：meta description / og:description
-    if not desc:
+        # 最后兜底：meta description / og:description
         meta = soup.find("meta", attrs={"name": "description"})
         if meta and meta.get("content"):
-            desc = clean_text(meta["content"])
+            desc = _clean_text(meta["content"])
     if not desc:
         og = soup.find("meta", attrs={"property": "og:description"})
         if og and og.get("content"):
-            desc = clean_text(og["content"])
-    # ------------------------------------------------------------------------------------------
+            desc = _clean_text(og["content"])
+    # ------------------------------------------------------------------------
 
     # ----------------- Images (include slider, exclude "Others interested too") -----------------
     images = []
