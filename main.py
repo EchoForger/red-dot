@@ -99,6 +99,49 @@ def save_json(path, data):
     os.replace(tmp_path, path)
 
 
+# ===================== ✅ 清理 projects.json（新增） =====================
+
+def cleanup_projects_json(projects_path: str) -> int:
+    """
+    打开 projects.json，删除不合规项目：
+    - Description 为空/全空白
+    - Images 不是 list 或为空 list
+    返回删除数量
+    """
+    projects = load_json(projects_path, [])
+
+    # projects.json 不存在时，load_json 会返回 default（这里是 []），无需清理
+    if not projects:
+        return 0
+
+    if not isinstance(projects, list):
+        print(f"⚠️ projects.json 结构不是 list，跳过清理：{projects_path}")
+        return 0
+
+    def is_valid(p: dict) -> bool:
+        if not isinstance(p, dict):
+            return False
+        desc = (p.get("Description") or "").strip()
+        imgs = p.get("Images", [])
+        if not desc:
+            return False
+        if not isinstance(imgs, list) or len(imgs) == 0:
+            return False
+        return True
+
+    before = len(projects)
+    projects = [p for p in projects if is_valid(p)]
+    removed = before - len(projects)
+
+    if removed > 0:
+        save_json(projects_path, projects)
+        print(f"🧹 已清理 projects.json：删除 {removed} 条不合规项目（剩余 {len(projects)} 条）")
+    else:
+        print(f"✅ projects.json 无需清理（共 {before} 条，全部合规）")
+
+    return removed
+
+
 # ===================== Selenium 搜索页抓取（带缓存） =====================
 
 def collect_project_links_with_cache(
@@ -113,6 +156,7 @@ def collect_project_links_with_cache(
     cache_map = {
         item["Search Page URL"]: item["Project URLs"]
         for item in cache
+        if isinstance(item, dict) and "Search Page URL" in item and "Project URLs" in item
     }
 
     all_project_urls = set()
@@ -272,16 +316,48 @@ def extract_project_data(url, headers, base_url):
             desc = _clean_text(og["content"])
     # ------------------------------------------------------------------------
 
-    # ----------------- Images (include slider, exclude "Others interested too") -----------------
+    # ----------------- ✅ Images (兼容旧规则 + 支持 fileadmin/srcset/meta/jsonld；仍排除推荐区) -----------------
     images = []
+
+    IMG_EXT_RE = re.compile(r"\.(jpe?g|png|webp|gif|bmp|tiff|svg)(\?.*)?$", re.I)
+
+    def _pick_from_srcset(srcset: str) -> str:
+        """
+        srcset 里通常是 'url 320w, url 640w ...' 或 'url 1x, url 2x'
+        这里简单取最后一个（通常最大/最清晰）
+        """
+        if not srcset:
+            return ""
+        parts = [p.strip() for p in srcset.split(",") if p.strip()]
+        if not parts:
+            return ""
+        return parts[-1].split()[0].strip()
 
     def add_img(u: str):
         if not u:
             return
-        u = u.split("#")[0]
-        if ("projects_pim" in u) or ("eID=tx_solr_image" in u and "usage=slider" in u):
-            images.append(urljoin(base_url, u))
+        u = u.strip().split("#")[0]
 
+        # 处理 //xxx
+        if u.startswith("//"):
+            u = "https:" + u
+
+        # 统一成绝对 URL
+        u_abs = urljoin(base_url, u)
+
+        # ✅ 兼容旧逻辑：slider / projects_pim
+        ok_old = ("projects_pim" in u_abs) or ("eID=tx_solr_image" in u_abs and "usage=slider" in u_abs)
+
+        # ✅ 新增：Red Dot 很多项目主图在 fileadmin/user_upload/projects
+        ok_fileadmin = ("/fileadmin/user_upload/projects/" in u_abs) or ("/fileadmin/user_upload/" in u_abs)
+
+        # ✅ 兜底：看起来是图片扩展名也收（但仍受 boundary/main 容器限制）
+        ok_ext = bool(IMG_EXT_RE.search(u_abs))
+
+        if ok_old or ok_fileadmin or ok_ext:
+            images.append(u_abs)
+
+    # 边界：到 “Others interested too” 就停止
     boundary_tag = None
     boundary_text = soup.find(string=re.compile(r"Others interested too", re.I))
     if boundary_text:
@@ -289,6 +365,45 @@ def extract_project_data(url, headers, base_url):
 
     container = soup.select_one("main") or soup.body or soup
 
+    # 1) meta 主图（常见）
+    for m in soup.select('meta[property="og:image"], meta[property="og:image:url"], meta[name="twitter:image"]'):
+        add_img(m.get("content") or "")
+
+    # 2) JSON-LD image 字段（兜底）
+    def _collect_images_from_obj(obj):
+        found = []
+        if isinstance(obj, dict):
+            for k, v in obj.items():
+                if k.lower() == "image":
+                    if isinstance(v, str):
+                        found.append(v)
+                    elif isinstance(v, list):
+                        for it in v:
+                            if isinstance(it, str):
+                                found.append(it)
+                            elif isinstance(it, dict) and isinstance(it.get("url"), str):
+                                found.append(it["url"])
+                    elif isinstance(v, dict) and isinstance(v.get("url"), str):
+                        found.append(v["url"])
+                else:
+                    found.extend(_collect_images_from_obj(v))
+        elif isinstance(obj, list):
+            for it in obj:
+                found.extend(_collect_images_from_obj(it))
+        return found
+
+    for s in soup.find_all("script", attrs={"type": "application/ld+json"}):
+        txt = (s.string or "").strip()
+        if not txt:
+            continue
+        try:
+            data = json.loads(txt)
+            for u in _collect_images_from_obj(data):
+                add_img(u)
+        except Exception:
+            pass
+
+    # 3) main 容器扫描：img/a/source（含 lazyload & srcset）
     for el in container.descendants:
         if boundary_tag is not None and isinstance(el, Tag) and el is boundary_tag:
             break
@@ -296,12 +411,18 @@ def extract_project_data(url, headers, base_url):
             continue
 
         if el.name == "img":
-            src = el.get("src") or el.get("data-src") or ""
+            src = el.get("src") or el.get("data-src") or el.get("data-original") or ""
             add_img(src)
+            add_img(_pick_from_srcset(el.get("srcset") or ""))
+
+        elif el.name == "source":
+            add_img(_pick_from_srcset(el.get("srcset") or ""))
+
         elif el.name == "a":
             href = el.get("href") or ""
             add_img(href)
 
+    # 去重（保序）
     images = list(dict.fromkeys(images))
     # ------------------------------------------------------------------------------------------
 
@@ -382,6 +503,9 @@ def main():
     projects_path = os.path.join(args.output_dir, "projects.json")
     search_cache_path = os.path.join(args.output_dir, "search_pages.json")
 
+    # ✅ 启动时：先清理历史 projects.json 中不合规项
+    cleanup_projects_json(projects_path)
+
     # ✅ 读取已有数据，并建立 url -> index 的映射，方便覆盖更新
     projects = load_json(projects_path, [])
     url_to_idx = {p.get("Project URL"): i for i, p in enumerate(projects) if p.get("Project URL")}
@@ -389,6 +513,16 @@ def main():
     def is_empty_desc(p: dict) -> bool:
         desc = p.get("Description", "")
         return (desc is None) or (str(desc).strip() == "")
+
+    # ✅ 写盘过滤：只有 Description + Images 都非空，才允许保存
+    def can_save(data: dict) -> bool:
+        desc = (data.get("Description") or "").strip()
+        imgs = data.get("Images", [])
+        if not desc:
+            return False
+        if (not isinstance(imgs, list)) or (len(imgs) == 0):
+            return False
+        return True
 
     print("🔎 分页收集项目链接（带缓存）...")
     links = collect_project_links_with_cache(
@@ -402,7 +536,7 @@ def main():
 
     print(f"✅ 共得到 {len(links)} 个唯一项目链接")
 
-    # ✅ 只处理：不存在 或 Description 为空 的 URL
+    # ✅ 只处理：不存在 或 Description 为空 的 URL（保持你原逻辑兼容）
     todo_urls = [
         url for url in links
         if (url not in url_to_idx) or is_empty_desc(projects[url_to_idx[url]])
@@ -410,7 +544,13 @@ def main():
 
     def worker(url: str):
         data = extract_project_data(url, headers, base_url)
-        data["Local Images"] = save_images(data, args.output_dir, headers)
+
+        # ✅ 如果 Images 为空，没必要下载本地图片（省时间/带宽）
+        if isinstance(data.get("Images"), list) and len(data["Images"]) > 0:
+            data["Local Images"] = save_images(data, args.output_dir, headers)
+        else:
+            data["Local Images"] = []
+
         if args.detail_delay and args.detail_delay > 0:
             time.sleep(args.detail_delay)
         return url, data
@@ -430,7 +570,12 @@ def main():
             try:
                 url, data = fut.result()
 
-                # 主线程合并/覆盖
+                # 🚫 如果本次爬下来的 Description 或 Images 为空：不保存、不覆盖旧数据
+                if not can_save(data):
+                    print(f"⏭️ 跳过（Description/Images 为空，不保存）: {url}")
+                    continue
+
+                # ✅ 主线程合并/覆盖
                 if url in url_to_idx:
                     projects[url_to_idx[url]] = data
                 else:
