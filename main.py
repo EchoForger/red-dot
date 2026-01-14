@@ -543,6 +543,7 @@ def main():
     ]
 
     def worker(url: str):
+        print(f"🔎 正在爬取：{url}")
         data = extract_project_data(url, headers, base_url)
 
         # ✅ 如果 Images 为空，没必要下载本地图片（省时间/带宽）
