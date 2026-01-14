@@ -1,7 +1,8 @@
-from flask import Flask, render_template_string, send_from_directory
+from flask import Flask, render_template_string, send_from_directory, request
 import json
 import os
 import argparse
+import math
 
 # -----------------------------
 # argparse
@@ -34,6 +35,12 @@ def parse_args():
         "--title",
         default="Red Dot Projects",
         help="网页标题"
+    )
+    parser.add_argument(
+        "--per-page",
+        type=int,
+        default=12,
+        help="每页展示数量"
     )
 
     return parser.parse_args()
@@ -75,7 +82,7 @@ HTML = """
       </div>
       <div class="hidden sm:flex items-center gap-2 text-sm text-slate-500">
         <span class="inline-flex items-center rounded-full bg-slate-100 px-3 py-1">
-          共 {{ projects|length }} 项
+          共 {{ total }} 项 · 每页 {{ per_page }} 项
         </span>
       </div>
     </div>
@@ -171,6 +178,57 @@ HTML = """
     {% endfor %}
   </main>
 
+  <!-- Pagination -->
+  <nav class="mx-auto max-w-6xl px-4 pb-6">
+    <div class="flex flex-col sm:flex-row items-center justify-between gap-3">
+      <div class="text-sm text-slate-500">
+        第 {{ page }} / {{ total_pages }} 页 · 共 {{ total }} 项
+      </div>
+
+      <div class="flex flex-wrap items-center gap-2">
+        <!-- Prev -->
+        {% if page > 1 %}
+          <a href="/?page={{ page - 1 }}"
+             class="rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700 shadow-sm hover:bg-slate-50">
+            ← 上一页
+          </a>
+        {% else %}
+          <span class="rounded-xl border border-slate-200 bg-slate-100 px-3 py-2 text-sm text-slate-400">
+            ← 上一页
+          </span>
+        {% endif %}
+
+        <!-- Page numbers (全量显示；数量很大时建议改省略号分页) -->
+        <div class="flex flex-wrap items-center gap-1">
+          {% for n in page_numbers %}
+            {% if n == page %}
+              <span class="rounded-lg bg-slate-900 px-3 py-2 text-sm font-medium text-white">
+                {{ n }}
+              </span>
+            {% else %}
+              <a href="/?page={{ n }}"
+                 class="rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700 hover:bg-slate-50">
+                {{ n }}
+              </a>
+            {% endif %}
+          {% endfor %}
+        </div>
+
+        <!-- Next -->
+        {% if page < total_pages %}
+          <a href="/?page={{ page + 1 }}"
+             class="rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700 shadow-sm hover:bg-slate-50">
+            下一页 →
+          </a>
+        {% else %}
+          <span class="rounded-xl border border-slate-200 bg-slate-100 px-3 py-2 text-sm text-slate-400">
+            下一页 →
+          </span>
+        {% endif %}
+      </div>
+    </div>
+  </nav>
+
   <footer class="mx-auto max-w-6xl px-4 pb-10 pt-4 text-xs text-slate-400">
     <div class="border-t border-slate-200 pt-6">
       本页面使用 Tailwind CSS 渲染。小屏自动上下布局；大屏左右各半。
@@ -209,10 +267,38 @@ def index():
             fixed.append(x)
         p["Local Images"] = fixed
 
+    # -----------------------------
+    # Pagination
+    # -----------------------------
+    per_page = max(1, args.per_page)
+
+    try:
+        page = int(request.args.get("page", "1"))
+    except ValueError:
+        page = 1
+    if page < 1:
+        page = 1
+
+    total = len(projects)
+    total_pages = max(1, math.ceil(total / per_page))
+    if page > total_pages:
+        page = total_pages
+
+    start = (page - 1) * per_page
+    end = start + per_page
+    projects_page = projects[start:end]
+
+    page_numbers = list(range(1, total_pages + 1))
+
     return render_template_string(
         HTML,
-        projects=projects,
-        title=args.title
+        projects=projects_page,
+        title=args.title,
+        page=page,
+        per_page=per_page,
+        total=total,
+        total_pages=total_pages,
+        page_numbers=page_numbers,
     )
 
 
