@@ -12,7 +12,9 @@
             "console": "integratedTerminal",
             "args": [
                 "--max-pages",
-                "1963"
+                "1",
+                "--workers",
+                "1"
             ]
         }
     ]

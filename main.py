@@ -17,6 +17,12 @@ from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
 from webdriver_manager.chrome import ChromeDriverManager
 
+import re
+from collections import Counter
+from urllib.parse import urljoin
+from bs4 import Tag
+
+YEAR_RE = re.compile(r"\b(19\d{2}|20[0-3]\d)\b", re.I)
 
 # ===================== argparse =====================
 
@@ -279,6 +285,112 @@ def extract_lead_description_text(soup, title: str) -> str:
     return desc
 
 
+def extract_year_from_reddot(soup, raw_text: str, base_url: str) -> str:
+    """
+    Red Dot 项目页年份提取（更鲁棒）：
+    1) 优先从项目相关图片/链接URL中找：
+       - /projects_pim/<year>/...
+       - 文件名中出现 <year>PD / <year>BCD / <year>DC
+    2) 再从 main 可见内容中找，并过滤常见噪声（TYPO3/copyright/meta date等）
+    3) 最后兜底：从 raw_text 中找，但先去掉 <head>（避免 meta date / copyright 抢占）
+    """
+    cand = []
+
+    def add(y: str, w: int = 1):
+        if y:
+            cand.extend([y] * w)
+
+    # -------------- 1) 强信号：从页面中所有可能的 url / srcset 抽取 --------------
+    # 注意：不依赖你后面 images 是否收集成功；这里单独扫描一遍更稳
+    url_values = []
+
+    # meta image 也可能带 projects_pim
+    for m in soup.select('meta[property="og:image"], meta[property="og:image:url"], meta[name="twitter:image"]'):
+        c = (m.get("content") or "").strip()
+        if c:
+            url_values.append(c)
+
+    # 扫 main（避免 footer/head 噪声），但仍能拿到主图/slider 的 src/srcset/href
+    container = soup.select_one("main") or soup.body or soup
+    for el in container.descendants:
+        if not isinstance(el, Tag):
+            continue
+        if el.name == "img":
+            for k in ("src", "data-src", "data-original", "srcset"):
+                v = el.get(k)
+                if v:
+                    url_values.append(v)
+        elif el.name == "source":
+            v = el.get("srcset") or el.get("data-src")
+            if v:
+                url_values.append(v)
+        elif el.name == "a":
+            v = el.get("href")
+            if v:
+                url_values.append(v)
+
+    # 展开 srcset： "url 575w, url 1150w" -> [url, url]
+    expanded = []
+    for v in url_values:
+        v = v.strip()
+        if not v:
+            continue
+        if "," in v and (" " in v):  # 粗略判断 srcset
+            parts = [p.strip().split()[0] for p in v.split(",") if p.strip()]
+            expanded.extend(parts)
+        expanded.append(v)
+
+    for u in expanded:
+        u = u.strip().split("#")[0]
+        if not u:
+            continue
+        if u.startswith("//"):
+            u = "https:" + u
+        u_abs = urljoin(base_url, u)
+
+        # /projects_pim/<year>/
+        m = re.search(r"/projects_pim/(19\d{2}|20[0-3]\d)/", u_abs, re.I)
+        if m:
+            add(m.group(1), w=10)
+
+        # 文件名里：2025PD / 2025BCD / 2025DC
+        m = re.search(r"\b(19\d{2}|20[0-3]\d)\s*(PD|BCD|DC)\b", u_abs, re.I)
+        if m:
+            add(m.group(1), w=9)
+
+    if cand:
+        return Counter(cand).most_common(1)[0][0]
+
+    # -------------- 2) 次强信号：main 可见文本，过滤噪声行 --------------
+    visible_text = (container.get_text("\n", strip=True) if container else "")
+    if visible_text:
+        noise = [
+            r"TYPO3",
+            r"copyright",
+            r"meta\s+name",
+            r"\bgenerator\b",
+            r"revisit-after",
+        ]
+        lines = []
+        for line in visible_text.splitlines():
+            if any(re.search(p, line, re.I) for p in noise):
+                continue
+            lines.append(line)
+        vt = "\n".join(lines)
+        years = YEAR_RE.findall(vt)
+        if years:
+            return Counter(years).most_common(1)[0][0]
+
+    # -------------- 3) 兜底：raw_text 但先去掉 head，避免 meta date 抢占 --------------
+    if raw_text:
+        cleaned = re.sub(r"<head\b.*?</head>", "", raw_text, flags=re.I | re.S)
+        m = YEAR_RE.search(cleaned)
+        if m:
+            return m.group(1)
+
+    return ""
+
+
 def extract_project_data(url, headers, base_url):
     soup, raw_text = get_soup(url, headers)
 
@@ -290,8 +402,8 @@ def extract_project_data(url, headers, base_url):
     if cat:
         category = cat.get_text(" / ", strip=True)
 
-    year_match = re.search(r"\b(19\d{2}|20[0-3]\d)\b", raw_text)
-    year = year_match.group(0) if year_match else ""
+    # ✅ 替换这里：用更稳的年份抽取（其余逻辑不变）
+    year = extract_year_from_reddot(soup, raw_text, base_url)
 
     # ✅ 先用“Back/Download ~ Jury”规则抽取 lead description
     desc = extract_lead_description_text(soup, title)
