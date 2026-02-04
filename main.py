@@ -7,10 +7,11 @@ import glob
 import argparse
 import requests
 from urllib.parse import urljoin
-from bs4 import BeautifulSoup, Tag
 from tqdm import tqdm
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
+
+from bs4 import BeautifulSoup, Tag
 
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
@@ -20,7 +21,6 @@ from webdriver_manager.chrome import ChromeDriverManager
 import re
 from collections import Counter
 from urllib.parse import urljoin
-from bs4 import Tag
 
 YEAR_RE = re.compile(r"\b(19\d{2}|20[0-3]\d)\b", re.I)
 
@@ -572,14 +572,14 @@ def download_image(url, headers):
 
 
 def save_images(data, output_dir, headers):
-    folder = os.path.join(output_dir, sanitize_name(data["Title"]))
+    folder = f'{output_dir}/{sanitize_name(data["Title"])}'
     os.makedirs(folder, exist_ok=True)
 
     local_images = []
 
     for i, img in enumerate(data["Images"], 1):
         # 如果 image_i.* 已存在，就复用（避免重复下载）
-        existed = glob.glob(os.path.join(folder, f"image_{i}.*"))
+        existed = glob.glob(f'{folder}/image_{i}.*')
         if existed:
             local_images.append(existed[0])
             continue
@@ -587,7 +587,7 @@ def save_images(data, output_dir, headers):
         content, content_type = download_image(img, headers)
         ext = _ext_from_content_type(content_type)
 
-        path = os.path.join(folder, f"image_{i}{ext}")
+        path = f"{folder}/image_{i}{ext}"
         with open(path, "wb") as f:
             f.write(content)
 
@@ -612,8 +612,8 @@ def main():
     base_url = "https://www.red-dot.org"
     os.makedirs(args.output_dir, exist_ok=True)
 
-    projects_path = os.path.join(args.output_dir, "projects.json")
-    search_cache_path = os.path.join(args.output_dir, "search_pages.json")
+    projects_path = f'{args.output_dir}/projects.json'
+    search_cache_path = f'{args.output_dir}/search_pages.json'
 
     # ✅ 启动时：先清理历史 projects.json 中不合规项
     cleanup_projects_json(projects_path)
